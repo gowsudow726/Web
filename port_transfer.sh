@@ -12,7 +12,7 @@ print_with_delay() {
 }
 
 # Introduction animation
-print_with_delay "LazyTunnel by DEATHLINE | @NamelesGhoul" 0.1
+print_with_delay " Creator @Mr_Silco" 0.1
 
 SERVICE_FILE="/etc/systemd/system/iptables.service"
 IP_FILE="/root/ip.txt"
