@@ -1,161 +1,134 @@
 #!/bin/bash
 
-# Function to print characters with delay
-print_with_delay() {
-    text="$1"
-    delay="$2"
-    for ((i = 0; i < ${#text}; i++)); do
-        echo -n "${text:$i:1}"
-        sleep $delay
+BASE_DIR="/opt/ssh_tunnel"
+LOGFILE="$BASE_DIR/ssh_tunnel.log"
+STATUSFILE="$BASE_DIR/status.log"
+RUNNER="$BASE_DIR/tunnel_runner.sh"
+SERVICE_FILE="/etc/systemd/system/ssh_tunnel.service"
+
+function start_tunnel() {
+    read -p "VPS IP yaz: " VPS_IP
+    read -p "Trasnfer port yaz (meselem: 80): " PORT
+    read -s -p "VPS password yaz: " VPS_PASS
+    echo ""
+
+    sudo mkdir -p "$BASE_DIR"
+
+    echo "Tünel scripti .."
+
+    cat <<EOF | sudo tee $RUNNER > /dev/null
+#!/bin/bash
+
+LOGFILE="$LOGFILE"
+STATUSFILE="$STATUSFILE"
+VPS_IP="$VPS_IP"
+PORT=$PORT
+VPS_PASS="$VPS_PASS"
+
+while true; do
+    echo "\$(date): Arabaglanysyk gurnalyar..." >> \$LOGFILE
+    sshpass -p "\$VPS_PASS" ssh -o StrictHostKeyChecking=no -N -R \$PORT:localhost:\$PORT root@\$VPS_IP >> \$LOGFILE 2>&1 &
+    SSH_PID=\$!
+
+    # Bağlantı izleme
+    while kill -0 \$SSH_PID 2>/dev/null; do
+        sleep 5
+        echo -n "\$(date): Arabaglanysyk analizi... " >> \$STATUSFILE
+        nc -z -w2 127.0.0.1 \$PORT
+        if [ \$? -eq 0 ]; then
+            echo "✓ Tünel aktif" >> \$STATUSFILE
+        else
+            echo "✗ Tünel işlänok" >> \$STATUSFILE
+        fi
     done
-    echo
-}
 
-# Introduction animation
-print_with_delay " Creator @Mr_Silco" 0.1
+    echo "\$(date): Arabaglanysyk gitdi tazden barlayan..." >> \$LOGFILE
+    sleep 5
+done
+EOF
 
-SERVICE_FILE="/etc/systemd/system/iptables.service"
-IP_FILE="/root/ip.txt"
-SCRIPT_FILE="/root/LazyTunnel.sh"
-HOSTS_FILE="/etc/hosts"
+    sudo chmod +x $RUNNER
 
-# Function to download the script
-download_script() {
-  curl -fsSL -o "${SCRIPT_FILE}" https://raw.githubusercontent.com/deathline94/LazyTunnel/main/LazyTunnel.sh
-  chmod +x "${SCRIPT_FILE}"
-}
+    echo "systemd servisi yasalya..."
 
-# Function to get the current SSH port
-get_ssh_port() {
-  ssh_port=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}')
-  if [ -z "$ssh_port" ]; then
-    ssh_port=22
-  fi
-  echo "Detected SSH port: $ssh_port"
-}
+    cat <<EOF | sudo tee $SERVICE_FILE > /dev/null
+[Unit]
+Description=SSH Reverse Tunnel
+After=network.target
 
-# Function to install IPTables rules and set up service
-install() {
-  # Get current SSH port
-  get_ssh_port
-
-  # Ask user whether to tunnel all ports or specific ports
-  read -p "Do you want to tunnel all ports (excluding SSH port $ssh_port)? [y/n]: " tunnel_all
-  if [[ "$tunnel_all" == "y" || "$tunnel_all" == "Y" ]]; then
-    tunnel_all_ports=true
-  else
-    tunnel_all_ports=false
-    read -p "Please enter the ports you want to tunnel, separated by spaces (e.g., 80 443 1194): " user_ports
-    # Convert user_ports into an array
-    IFS=' ' read -r -a ports_array <<< "$user_ports"
-  fi
-
-  # Check and update /etc/hosts
-  hostname=$(hostname)
-  if ! grep -q "127.0.0.1 ${hostname}" "${HOSTS_FILE}"; then
-    echo "127.0.0.1 ${hostname}" >> "${HOSTS_FILE}"
-    echo "Added 127.0.0.1 ${hostname} to ${HOSTS_FILE}"
-  fi
-
-  # Enable IP forwarding
-  sysctl -w net.ipv4.ip_forward=1
-
-  # Get mainland IP address
-  mainland_ip=$(curl -s https://api.ipify.org)
-  echo "Mainland IP Address (automatically detected): ${mainland_ip}"
-  read -p "Foreign IP Address: " foreign_ip
-
-  # Save IP addresses to file
-  echo "${mainland_ip}" > "${IP_FILE}"
-  echo "${foreign_ip}" >> "${IP_FILE}"
-  echo "${ssh_port}" >> "${IP_FILE}"
-
-  # Flush existing IPTables rules
-  iptables -F
-  iptables -t nat -F
-
-  # Set up IPTables rules for TCP, UDP, and ICMP
-  if [ "$tunnel_all_ports" = true ]; then
-    # Exclude SSH port from forwarding
-    iptables -t nat -A PREROUTING -p tcp --dport "$ssh_port" -j DNAT --to-destination "${mainland_ip}"
-    iptables -t nat -A PREROUTING -p tcp -j DNAT --to-destination "${foreign_ip}"
-    iptables -t nat -A PREROUTING -p udp -j DNAT --to-destination "${foreign_ip}"
-    iptables -t nat -A PREROUTING -p icmp -j DNAT --to-destination "${foreign_ip}"
-  else
-    # Forward only specified ports for TCP, UDP, and also allow ICMP
-    for port in "${ports_array[@]}"; do
-      if [ "$port" != "$ssh_port" ]; then
-        iptables -t nat -A PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "${foreign_ip}"
-        iptables -t nat -A PREROUTING -p udp --dport "$port" -j DNAT --to-destination "${foreign_ip}"
-      else
-        # Exclude SSH port
-        iptables -t nat -A PREROUTING -p tcp --dport "$ssh_port" -j DNAT --to-destination "${mainland_ip}"
-      fi
-    done
-    # Ensure SSH port is forwarded to mainland IP
-    if [[ ! " ${ports_array[@]} " =~ " ${ssh_port} " ]]; then
-      iptables -t nat -A PREROUTING -p tcp --dport "$ssh_port" -j DNAT --to-destination "${mainland_ip}"
-    fi
-  fi
-
-  # Always forward ICMP (for ping, etc.)
-  iptables -t nat -A PREROUTING -p icmp -j DNAT --to-destination "${foreign_ip}"
-
-  # Set up POSTROUTING for TCP, UDP, and ICMP
-  iptables -t nat -A POSTROUTING -j MASQUERADE
-
-  # Create and enable systemd service
-  echo "[Unit]
-Description=Persistent IPTables NAT rules
-Before=network.target
 [Service]
-Type=oneshot
-ExecStart=/usr/sbin/iptables-restore /etc/iptables/rules.v4
-ExecReload=/usr/sbin/iptables-restore /etc/iptables/rules.v4
-RemainAfterExit=yes
+ExecStart=$RUNNER
+Restart=always
+RestartSec=5
+User=root
+
 [Install]
-WantedBy=multi-user.target" | sudo tee "${SERVICE_FILE}" > /dev/null
+WantedBy=multi-user.target
+EOF
 
-  # Save IPTables rules to a file
-  mkdir -p /etc/iptables
-  iptables-save > /etc/iptables/rules.v4
+    echo "Servis tayyar..."
+    sudo systemctl daemon-reexec
+    sudo systemctl daemon-reload
+    sudo systemctl enable ssh_tunnel.service
+    sudo systemctl start ssh_tunnel.service
 
-  sudo systemctl enable iptables > /dev/null 2>&1
-  sudo systemctl start iptables
-
-  echo "Installation complete."
+    echo "✅ Tunel servisi aktif."
 }
 
-# Function to uninstall IPTables rules and remove service
-uninstall() {
-  echo "Uninstalling..."
+function stop_tunnel() {
+    echo "⛔ Servis pozulya..."
+    sudo systemctl stop ssh_tunnel.service
+    sudo systemctl disable ssh_tunnel.service
+    sudo rm -f $SERVICE_FILE
+    sudo systemctl daemon-reload
 
-  # Read IP addresses from file
-  mainland_ip=$(sed -n '1p' "${IP_FILE}")
-  foreign_ip=$(sed -n '2p' "${IP_FILE}")
-  ssh_port=$(sed -n '3p' "${IP_FILE}")
+    echo "🧹 faýl pozulya..."
+    sudo rm -rf "$BASE_DIR"
 
-  # Flush IPTables rules
-  iptables -F
-  iptables -t nat -F
-
-  # Stop and disable the service
-  sudo systemctl stop iptables
-  sudo systemctl disable iptables > /dev/null 2>&1
-
-  # Remove service file, IP file, and IPTables rules file
-  sudo rm -f "${SERVICE_FILE}"
-  sudo rm -f "${IP_FILE}"
-  sudo rm -f "${SCRIPT_FILE}"
-  sudo rm -f /etc/iptables/rules.v4
-
-  echo "Uninstallation complete."
+    echo "✔️ Tünel ve servis pozuldy."
 }
 
-# Main script logic
-if [[ "$1" == "uninstall" ]]; then
-  uninstall
-else
-  download_script
-  install
-fi
+function analyze_logs() {
+    echo "---- 🔍 Tünel analiz (Son 10 ) ----"
+    if [ -f "$STATUSFILE" ]; then
+        tail -n 10 "$STATUSFILE"
+    else
+        echo "Durum fayl yok."
+    fi
+
+    echo ""
+    echo "---- 🧾 SSH Logları (Son 10) ----"
+    if [ -f "$LOGFILE" ]; then
+        tail -n 10 "$LOGFILE"
+    else
+        echo "Log yok."
+    fi
+}
+
+function check_dependencies() {
+    for cmd in sshpass ssh nc; do
+        command -v $cmd >/dev/null 2>&1 || { echo >&2 "HATA: '$cmd' yüklü değil. Yüklemek için: sudo apt install $cmd"; exit 1; }
+    done
+}
+
+function show_menu() {
+    while true; do
+        echo ""
+        echo "=== tunnel panel==="
+        echo "1. Gurnamak"
+        echo "2. Pozmak"
+        echo "3. Analiz (log)"
+        echo "4. Çyk"
+        read -p "Sayla: " CHOICE
+
+        case $CHOICE in
+            1) check_dependencies; start_tunnel ;;
+            2) stop_tunnel ;;
+            3) analyze_logs ;;
+            4) echo "Çıkılıyor..."; exit 0 ;;
+            *) echo "Geçersiz seçim!" ;;
+        esac
+    done
+}
+
+show_menu
